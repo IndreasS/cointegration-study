@@ -4,8 +4,15 @@ sample?
 
     1. sort_by_pvalue   outcome by p-value decile
     2. spread_vol_check why the sort looks the way it does
-    3. against_vix      the same question with a volatility measure that
-                        does not come from the pair construction
+    3. against_vix      whether market volatility moves the same outcome
+
+The outcome is diverged per reversion, over pairs whose spread opened. It is a
+ratio rather than a share because a spread that moves further in z units hits both barriers more often,
+so the diverged and reverted shares both rise with volatility. The ratio asks
+which way it resolved, not how often.
+
+No standard errors: pair-years share stocks and years, so they are not
+independent.
 
 Saves two figures.
 """
@@ -24,10 +31,10 @@ def load():
     labels = pd.read_parquet("data/labels.parquet")
 
     # EG is run in both directions, but AAPL-MSFT and MSFT-AAPL are close to
-    # the same observation twice. Keeping both makes the sample look twice as big
-    # as it is. Which direction is kept is arbitrary, so
-    # it is fixed by name rather than by picking the smaller p-value, which
-    # would bias the sort. Not split on pair_id, since BRK-B has a hyphen.
+    # the same observation twice. Keeping both makes the sample look twice as
+    # big as it is. Which direction is kept is fixed by name rather than by
+    # picking the smaller p-value, which would bias the sort. Not split on
+    # pair_id, since BRK-B has a hyphen in it.
     labels = labels[labels["stockX"] < labels["stockY"]].copy()
 
     # Ranked within each year, otherwise the years with high pass rates would
@@ -40,31 +47,31 @@ def load():
     labels["opened"] = labels["outcome"] != "never_opened"
     labels["diverged"] = labels["outcome"] == "diverged"
     labels["reverted"] = labels["outcome"] == "reverted"
+    labels["resolved"] = labels["diverged"] | labels["reverted"]
 
     return labels
 
 
-def outcome_rates(df, group):
-    """
-    Diverged and reverted as shares of pairs that opened. Unresolved stays in
-    the denominator: dropping it would throw away spreads that never came back.
-    """
-    opened = df[df["opened"]]
-    grouped = opened.groupby(group)
+def outcomes(df, group):
+    """Outcome columns for pairs that opened, one row per group."""
+    grouped = df[df["opened"]].groupby(group)
 
     return pd.DataFrame({
         "n_opened": grouped.size(),
-        "diverged": grouped["diverged"].mean(),
-        "reverted": grouped["reverted"].mean(),
+        "diverged": grouped["diverged"].sum(),
+        "reverted": grouped["reverted"].sum(),
+        "resolved_share": grouped["resolved"].mean(),
+        "ratio": grouped["diverged"].sum() / grouped["reverted"].sum(),
     })
 
 
 def sort_by_pvalue(labels):
-    table = outcome_rates(labels, "p_decile")
+    table = outcomes(labels, "p_decile")
     table.insert(0, "mean_p", labels.groupby("p_decile")["p_value_coint"].mean())
 
-    print("\n=== 1. Outcome by p-value decile ===")
-    print(table.round(4).to_string())
+    print("\n=== 1. Diverged per reversion by p-value decile ===")
+    print(table[["mean_p", "n_opened", "diverged", "reverted", "ratio"]]
+          .round(4).to_string())
     return table
 
 
@@ -72,18 +79,20 @@ def spread_vol_check(labels):
     """
     A small p-value means a tight formation fit, so a small spread_std. That
     is the denominator of z, so the same move out of sample gives a bigger z.
-    If so, the barriers at 2 and 4 are not the same distance for every decile.
+    If so, low p-value pairs should open more, move more, and resolve more,
+    without resolving any more often in the right direction.
     """
     grouped = labels.groupby("p_decile")
 
     table = pd.DataFrame({
         "open_rate": grouped["opened"].mean(),
+        "resolved_share": outcomes(labels, "p_decile")["resolved_share"],
         "vol_mean": grouped["spread_vol"].mean(),
         "vol_median": grouped["spread_vol"].median(),
     })
 
-    # rho only. Pair-years share legs and years, so a p-value here would be
-    # far too small to mean anything.
+    # rho only. Pair-years are not independent, so the p-value would be
+    # meaningless.
     rho, _ = spearmanr(labels["p_value_coint"], labels["spread_vol"])
 
     print("\n=== 2. Spread volatility by p-value decile ===")
@@ -98,11 +107,12 @@ def load_vix():
     if os.path.exists(VIX_FILE):
         return pd.read_parquet(VIX_FILE)["vix"]
 
-    vix = yf.download("^VIX", start="2013-01-01", end="2025-12-31",
+    # end is exclusive in yfinance, so 2026-01-01 keeps 31 December 2025.
+    vix = yf.download("^VIX", start="2013-01-01", end="2026-01-01",
                       auto_adjust=True, progress=False)["Close"]
 
     # One column DataFrame on newer yfinance, Series on older. Without the
-    # squeeze the join below produces a column called ^VIX.
+    # squeeze the assignment below produces a column called ^VIX.
     if isinstance(vix, pd.DataFrame):
         vix = vix.iloc[:, 0]
 
@@ -112,22 +122,25 @@ def load_vix():
 
 
 def against_vix(labels):
-    table = outcome_rates(labels, "test_year")
+    table = outcomes(labels, "test_year")
     table["spread_vol"] = labels.groupby("test_year")["spread_vol"].mean()
 
     vix = load_vix()
     table["vix_mean"] = vix.groupby(vix.index.year).mean()
 
     print("\n=== 3. By test year, against mean VIX ===")
-    print(table.round(4).to_string())
+    print(table[["n_opened", "ratio", "spread_vol", "vix_mean"]]
+          .round(4).to_string())
 
-    # Spearman only. 2020 and 2022 sit well above the other years on VIX and
+    # spread_vol checks whether the VIX result is step 2 at the yearly level.
+    #
+    # Spearman because 2020 and 2022 sit well above the other years on VIX and
     # would drag a linear fit without being extreme in rank. At n=13 a
     # correlation needs to be around 0.55 to reach p<0.05.
     print()
-    for col in ["spread_vol", "diverged", "reverted"]:
+    for col in ["ratio", "spread_vol"]:
         rho, p = spearmanr(table["vix_mean"], table[col])
-        print(f"{col:11s} vs mean VIX: rho={rho:+.3f} (p={p:.3f})")
+        print(f"{col:11s} vs mean VIX: rho={rho:+.3f} (p={p:.3f}, n={len(table)})")
 
     return table
 
@@ -136,12 +149,12 @@ def figures(p_table, vol_table, year_table):
     os.makedirs("figures", exist_ok=True)
     plt.close("all")
 
+    # Side by side because the right panel is the explanation for the left.
     fig, axes = plt.subplots(1, 2, figsize=(12, 5))
 
-    axes[0].plot(p_table.index, p_table["diverged"], "o-", label="diverged")
-    axes[0].plot(p_table.index, p_table["reverted"], "o-", label="reverted")
-    axes[0].set_ylabel("Share of opened pairs")
-    axes[0].legend()
+    axes[0].plot(p_table.index, p_table["ratio"], "o-")
+    axes[0].axhline(1.0, color="grey", lw=0.8, ls=":")     # diverged = reverted
+    axes[0].set_ylabel("Diverged per reversion")
 
     axes[1].plot(vol_table.index, vol_table["vol_mean"], "o-", color="tab:grey")
     axes[1].set_ylabel("Mean test-year spread volatility (z units)")
@@ -155,22 +168,24 @@ def figures(p_table, vol_table, year_table):
     plt.close(fig)
 
     fig, ax = plt.subplots(figsize=(8, 5))
-    ax.scatter(year_table["vix_mean"], year_table["diverged"], s=60)
+    ax.scatter(year_table["vix_mean"], year_table["ratio"], s=60)
 
     for year, row in year_table.iterrows():
-        ax.annotate(str(year), (row["vix_mean"], row["diverged"]),
+        ax.annotate(str(year), (row["vix_mean"], row["ratio"]),
                     xytext=(5, 3), textcoords="offset points", fontsize=9)
 
-    rho, p = spearmanr(year_table["vix_mean"], year_table["diverged"])
+    rho, p = spearmanr(year_table["vix_mean"], year_table["ratio"])
 
-    # Title reports the statistic only. The sign has to be read off the rerun.
+    ax.axhline(1.0, color="grey", lw=0.8, ls=":")
     ax.set_xlabel("Mean VIX over test year")
-    ax.set_ylabel("Share of opened pairs that diverged")
+    ax.set_ylabel("Diverged per reversion")
     ax.set_title(f"Spearman rho = {rho:.2f}, p = {p:.3f}, n = {len(year_table)}")
 
     fig.tight_layout()
     fig.savefig("figures/vix_regime.png", dpi=150)
     plt.close(fig)
+
+    print("\nSaved figures/pvalue_deciles.png and figures/vix_regime.png")
 
 
 if __name__ == "__main__":
