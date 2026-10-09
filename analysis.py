@@ -17,6 +17,11 @@ from scipy.stats import pearsonr, spearmanr
 
 labels = pd.read_parquet("data/labels.parquet")
 
+# EG runs in both directions, but AAPL-MSFT and MSFT-AAPL are near enough the
+# same test. Keeping both double counts every pair. Direction is fixed by name
+# rather than by taking the smaller p-value, which would bias the sort.
+labels = labels[labels["stockX"] < labels["stockY"]].copy()
+
 # Rank within each test year before cutting into deciles. Pooling across years
 # would let one year's p-value distribution dominate the buckets, since the
 # pass rate varies from 3.5% to 13% across the sample.

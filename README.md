@@ -1,140 +1,187 @@
-# Does a cointegration p-value predict which pairs actually trade well?
+# Does the cointegration p-value pick pairs that revert?
 
-Pairs trading rests on finding two stocks whose spread reverts. The standard way
-to find them is an Engle-Granger cointegration test, and the p-value it returns
-is treated as a ranking: the smaller it is, the better the pair.
+Pairs are usually selected with an Engle-Granger test, with a smaller p-value
+taken to mean a better pair. This study tests that out of sample.
 
-This study tests that. It screens 2,862 ordered pairs of S&P 500 stocks across
-13 rolling windows, trades each one the following year on frozen parameters, and
-checks whether the ranking held up.
+## Data
 
-It did not. Formation p-value carries no useful information about out-of-sample
-performance. Outcomes track volatility regime instead.
+- 54 S&P 500 stocks: top 8 by market cap in each of the 7 largest GICS sectors
+  (GOOG excluded as a second share class of GOOGL, GEV for short history)
+- 13 rolling windows: 3 year formation, 1 year test (test years 2013-2025)
+- Both directions of each pair are screened (2,862 ordered pairs per window).
+  The outcome analysis keeps one direction per pair: 18,289 pair-years
+- Alpha, beta, spread mean and spread std are fitted on formation and held
+  fixed in the test year
 
-## Findings
+## Outcome
 
-**1. The p-value ranking is not monotone. Middle-ranked pairs do best.**
+Each pair-year is evaluated two ways.
 
-![Persistence and return by p-value decile](figures/decile_sort.png)
+### Persistence
 
-| Decile | Mean p | Persistence | Median return | Stop-outs per reversion |
-|---|---|---|---|---|
-| 1 (most significant) | 0.043 | 25.8% | -0.0245 | 1.52 |
-| 5 | 0.447 | 39.3% | -0.0238 | 1.42 |
-| 7 | 0.659 | 42.2% | -0.0242 | 1.51 |
-| 10 (least significant) | 0.968 | 13.6% | -0.0587 | 3.88 |
+A pair-year **persisted** if the z-score crossed zero at least twice during the
+test year and never reached |z| = 4. Both conditions are needed: a spread that
+never crosses has stopped oscillating, and one that reaches 4 sd has broken the
+formation relationship.
 
-Pairs at p ≈ 0.66, which no practitioner would trade, held together 42% of the
-time against 26% for the most significant decile. Every decile lost money on
-median.
+### Trading
 
-The only place the p-value carries information is at the bottom. Decile 10
-stopped out 3.9 times per reversion against about 1.5 everywhere else, so the
-test reliably identifies pairs with no relationship at all.
+The spread is traded on the frozen z-score:
 
-**2. The screen finds no more pairs than dependence-preserving noise.**
+- **enter** when |z| reaches 2
+- **exit** when z crosses its mean, closing the trade as **reverted**
+- **stop** when |z| reaches 4, closing it as **stopped**
+- positions still open at year end are **marked** to market and closed
 
-A block bootstrap null puts the false positive rate at 6.4%, not the nominal 5%.
-Against that benchmark, windows testing 2013-19 averaged 4.82%, so real S&P 500
-pairs cointegrated *less* often than resampled data with cointegration destroyed
-by construction.
+After a trade closes, the strategy cannot re-enter until |z| falls back inside
+2. Without that gate a spread sitting outside the band would be re-entered on
+every bar. Pair-years therefore carry between zero and a few trades; mean
+trades per pair-year runs from 1.04 to 1.77 across deciles.
 
-**3. Outcomes track volatility regime.**
+A trade's return is the z-score captured, converted to price terms by the
+frozen formation std, over the capital committed at entry:
 
-![Stop-out rate against mean VIX](figures/vix_regime.png)
+```
+z_captured    = sign(entry_z) * (entry_z - exit_z)
+entry_capital = |y_entry| + |beta| * |x_entry|
+trade_return  = z_captured * spread_std / entry_capital - 0.001 - 0.0005
+```
 
-Stop-outs per reversion correlate negatively with mean VIX across the 13 test
-years (Spearman ρ = −0.643, p = 0.018), as does the fraction of pairs losing
-money (ρ = −0.599, p = 0.031). The worst years were the calmest: 2017 had the
-lowest VIX in the sample at 11.1 and produced 3.3 stop-outs per reversion, while
-2020 at VIX 29.3 produced 1.21.
+Returns are therefore **net** of a 10bp round trip cost and 5bp slippage. A
+pair-year's return is the sum of its trade returns. Stop fills are capped at
+the stop level, which flatters the strategy: a real gap through the stop fills
+worse.
 
-Formation persistence shows no such relationship (ρ = 0.225, p = 0.459).
+Across 18,289 pair-years there are 23,447 trades: 6,310 reverted, 10,742
+stopped, 6,395 marked. The headline measure is **stop-outs per reversion**,
+overall **1.70**. It is a ratio rather than a share because a spread that moves
+further in z units hits both barriers more often, so the stopped and reverted
+shares both rise with volatility. The ratio asks which way a trade resolved,
+not how often one happened.
 
-**4. Economic linkage makes no difference.**
+Return statistics use traded pairs only: a pair that never opened has a return
+of exactly zero, which is not the same as a flat trade.
 
-| | Persistence | Median return | Stop-outs per reversion |
+## Results
+
+### 1. The screen's pass rate is within noise
+
+A block bootstrap resamples returns with the same blocks for every stock, which
+removes cointegration but keeps cross-sectional correlation and volatility
+clustering. On the 2015-17 formation window (20 replications each):
+
+| Block length | Mean pass rate | sd | 5th-95th percentile |
 |---|---|---|---|
-| Cross sector | 32.83% | -0.0342 | 1.71 |
-| Same sector | 33.19% | -0.0276 | 1.68 |
-| Same sub-industry (n=822) | 32.97% | -0.0277 | 1.68 |
+| 10 days | 7.15% | 3.54pp | 2.9%-13.9% |
+| 21 days | 6.16% | 4.01pp | 1.9%-12.0% |
 
-Two semiconductor firms behave like a bank paired with a soft drinks company.
+Observed pass rates at p < 0.05 range from 3.54% to 13.07%. All are inside the
+block 10 range.
 
-## Method
+### 2. The p-value does not rank pairs below decile 10
 
-**Universe.** The 7 largest GICS sectors by aggregate S&P 500 market cap, top 8
-constituents by cap in each. GOOG is excluded as a second share class of GOOGL,
-where near-identical series make the EG test numerically unreliable. GEV is
-excluded for having 441 trading days against a 650 day minimum. 54 stocks.
+Deciles are formed within each test year.
 
-**Screen.** 3 year formation window, 1 year test window, stepped annually from
-2010. Both directions of each pair are tested, since Engle-Granger is asymmetric
-and y-on-x is a different test from x-on-y.
+![p-value deciles](figures/pvalue_deciles.png)
 
-**Validation.** The engine is checked against synthetic data with known answers
-before any of it is trusted. Across 49 seeds it recovers a hedge ratio of 2.0 to
-within 0.4% and detects every true pair. On 1,000 independent random walks it
-produces a 5.5% false positive rate against a nominal 5%, with p-values
-approximately uniform (mean 0.5066, sd 0.2900 against 0.5 and 0.2887 expected).
+| Decile | Mean p | Pairs | Persistence | Median return | Losing | Stop/revert |
+|---|---|---|---|---|---|---|
+| 1 | 0.043 | 1,839 | 25.9% | -2.56% | 56.7% | 1.56 |
+| 2 | 0.137 | 1,828 | 29.7% | -3.53% | 60.7% | 1.65 |
+| 3 | 0.236 | 1,828 | 34.7% | -2.98% | 56.6% | 1.52 |
+| 4 | 0.331 | 1,827 | 36.7% | -3.74% | 58.8% | 1.69 |
+| 5 | 0.435 | 1,828 | 38.1% | -2.80% | 56.6% | 1.53 |
+| 6 | 0.536 | 1,828 | 39.7% | -3.47% | 58.4% | 1.63 |
+| 7 | 0.645 | 1,826 | 41.3% | -2.51% | 56.2% | 1.59 |
+| 8 | 0.756 | 1,829 | 40.5% | -2.96% | 58.7% | 1.59 |
+| 9 | 0.866 | 1,827 | 32.4% | -3.24% | 57.8% | 1.88 |
+| 10 | 0.962 | 1,829 | 15.3% | -5.56% | 65.6% | 3.41 |
 
-**Bootstrap null.** Returns are resampled in blocks and cumulated back to
-prices. The same block sequence is applied to every stock, so contemporaneous
-correlation survives while the long-run relationship does not. Mean pairwise
-return correlation is 0.3587 in the real data and 0.3626 resampled.
+The stop/revert ratio sits between 1.52 and 1.69 across deciles 1 to 8 with no
+ordering. Only decile 10 separates.
 
-**Trading.** Enter at |z| ≥ 2 on the frozen spread, exit on reversion past the
-mean or a 4σ stop, 10bp round-trip cost plus slippage. Positions still open at
-the window end are marked to market rather than discarded.
+Persistence is not monotonic in the p-value either. It rises from 25.9% in
+decile 1 to 41.3% in decile 7, then falls to 15.3% in decile 10. Both
+conditions in the persistence test can fail at opposite ends: a tight formation
+fit gives a small spread std, so ordinary moves are large in z units and reach
+the 4 sd bound, while a loose fit gives a large spread std, so the z-score
+barely moves and does not cross.
+
+Comparing the extremes directly:
+
+| | Decile 1 | Decile 10 |
+|---|---|---|
+| Median return | -2.56% | -5.56% |
+| Mean return | -0.94% | -3.36% |
+| Fraction losing | 56.7% | 65.6% |
+| Persistence rate | 25.9% | 15.3% |
+
+### 3. Sector and sub-industry
+
+| | Pairs | Persistence | Median return | Losing | Stop/revert |
+|---|---|---|---|---|---|
+| Same sector | 2,326 | 33.5% | -2.77% | 57.5% | 1.71 |
+| Cross sector | 15,963 | 33.4% | -3.44% | 58.8% | 1.70 |
+| Same sub-industry | 411 | 32.6% | -3.38% | 58.6% | 1.72 |
+| Different sub-industry | 17,878 | 33.4% | -3.34% | 58.7% | 1.70 |
+
+None of the four measures separates on sector or on sub-industry.
+
+### 4. Outcomes track the volatility regime
+
+![VIX regime](figures/vix_regime.png)
+
+| Against mean VIX (n = 13 years) | Pearson r | p | Spearman rho | p |
+|---|---|---|---|---|
+| Stop-outs per reversion | -0.478 | 0.098 | **-0.648** | **0.017** |
+| Fraction losing | -0.516 | 0.071 | **-0.709** | **0.007** |
+| Median return | +0.479 | 0.098 | **+0.604** | **0.029** |
+| Persistence rate | +0.199 | 0.514 | +0.374 | 0.209 |
+
+Pairs trading fares worse in calm markets. The three worst years, 2013, 2017
+and 2024, had mean VIX of 14.2, 11.1 and 15.6 and stop/revert ratios of 3.86,
+2.72 and 3.02. The best, 2022 and 2023, ran at 25.6 and 16.9. Year by year
+figures are in `notes.md`.
+
+## Validation
+
+`test_coint.py` checks the engine against synthetic data with known answers,
+generated by `synthetic.py`. On cointegrated pairs with a true hedge ratio of
+2.0 and a half life of 10, across 49 seeds, it recovers a mean beta 0.4% from
+the true value at a per-seed standard deviation of 2.0%, recovers the half
+life, and detects every true pair. On 1,000 independent random walks the false
+positive rate is 5.5% and the p-values are approximately uniform.
+
+Tolerances come from the measured spread rather than from guessing. Nothing
+downstream is trusted until these pass.
+
+`simulate.py` run directly checks the trade simulator on four hand-worked
+z-paths: a reversion, a position still open at the end, two trades in one
+window, and a stop out.
 
 ## Running it
 
 ```bash
 pip install -r requirements.txt
 
-python universe.py      # builds data/universe.csv
-python prices.py        # builds data/prices.parquet
-python test_coint.py    # validates the engine, ~20 min
-python screen.py        # runs the screen, ~30 min
-python labels.py        # evaluates each pair on its test year
-python bootstrap.py     # builds the null distribution, ~1 hr
+python universe.py      # stock universe
+python prices.py        # adjusted closes
+python test_coint.py    # engine validation, ~20 min
+python screen.py        # screen, ~30 min
+python bootstrap.py     # null distribution, ~1 hr
+python labels.py        # persistence and trades per pair-year
 python analysis.py      # tables and figures
 ```
 
-Each script caches its output, so re-running skips work already done.
-
-| File | Does |
-|---|---|
-| `universe.py` | Builds the stock universe |
-| `prices.py` | Downloads and caches adjusted closes |
-| `coint.py` | Engle-Granger test for one ordered pair |
-| `synthetic.py` | Generates data with known answers |
-| `test_coint.py` | Validates the engine against it |
-| `screen.py` | Runs the screen across every pair and window |
-| `simulate.py` | Trades one pair's spread |
-| `labels.py` | Persistence label and trading outcome per pair |
-| `bootstrap.py` | Block bootstrap null |
-| `analysis.py` | Tables and figures |
-
-`notes.md` has the full working notes, including things that did not make it
-into this summary.
-
 ## Limitations
 
-- **Survivorship bias.** The universe uses current index membership and current
-  market caps, then runs back to 2010. Fixing this needs point-in-time
-  constituent data. It biases toward survivors, so toward optimism.
-- **n = 13 on the volatility result.** A correlation needs to be around 0.55 to
-  reach p < 0.05 at this sample size. The scatter also looks more like two
-  clusters than a gradient, with ten years at 1.1-1.6 stop-outs per reversion
-  and four at 2.7-3.8.
-- **One formation window length.** Only 3 years was tested.
-- **The persistence label may be confounded.** It requires ≥2 zero crossings and
-  max|z| < 4, which could be measuring moderate spread volatility rather than
-  mean reversion. This would explain the inverted U and has not been tested.
-- **Bootstrap replications are few.** 20 per block length, and the sd at block 21
-  is 4.81pp.
-
-## Built with
-
-Python, pandas, NumPy, statsmodels, arch, SciPy, matplotlib, yfinance.
+- Survivorship bias: current index members and caps are used back to 2010
+- The VIX result rests on 13 years
+- No standard errors on the decile table, since pair-years share stocks and
+  years
+- The null is estimated on one window with 20 replications
+- Stop fills are capped at the stop level, so losses are understated
+- Costs are a flat 10bp round trip plus 5bp slippage, the same for every pair
+  regardless of liquidity
+- Barrier levels (2, 0 and 4) and formation length (3 years) are not varied
+- Prices end on 30 December 2025
