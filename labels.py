@@ -1,9 +1,21 @@
 """
 Evaluates every screened pair on its test year using frozen formation
-parameters. Records the persistence label and the trading outcome.
+parameters.
 
-Alpha, beta, spread mean and spread std all come from formation. Re-fitting any
-of them on the test window would be lookahead.
+Alpha, beta and spread std all come from formation. Re-fitting any of them on
+the test window would be lookahead.
+
+Two things come out per pair-year:
+
+    outcome      what happened the first time the spread widened to 2 sd
+    spread_vol   how much the z-score moved over the test year
+
+Only the first opening is kept. Counting every opening needs a re-entry rule,
+and a pair that opens six times would then weigh six times as much as one that
+opens once. One pair-year, one outcome.
+
+spread_vol is not an outcome. It is there for the second step in analysis.py.
+same_sector is carried through from the screen for the fourth.
 
 Saves labels.parquet.
 """
@@ -11,13 +23,60 @@ Saves labels.parquet.
 import numpy as np
 import pandas as pd
 
-from simulate import simulate_trades
-
 MIN_TEST_OBS = 200
+ENTRY = 2.0
+DIVERGE = 4.0
+
+
+def first_opening(z, entry=ENTRY, diverge=DIVERGE):
+    """
+    never_opened, reverted, diverged or unresolved.
+
+    Reverted means z comes back through zero on the side it opened from.
+    """
+    z = np.asarray(z, dtype=float)
+
+    opened = np.flatnonzero(np.abs(z) >= entry)
+    if len(opened) == 0:
+        return "never_opened"
+
+    t0 = opened[0]
+    side = np.sign(z[t0])
+    after = z[t0 + 1:]
+
+    # The opening day itself is not checked for divergence, so a spread that
+    # jumps straight to 4.5 still gets one more day to come back.
+    back = np.flatnonzero(side * after <= 0)
+    blown = np.flatnonzero(np.abs(after) >= diverge)
+
+    t_back = back[0] if len(back) else np.inf
+    t_blown = blown[0] if len(blown) else np.inf
+
+    if np.isinf(t_back) and np.isinf(t_blown):
+        return "unresolved"
+
+    # <= so that a day which crosses zero and lands beyond 4 on the other side
+    # counts as diverged. That spread would not have been a comfortable exit.
+    return "diverged" if t_blown <= t_back else "reverted"
+
+
+def check_first_opening():
+    cases = [
+        ([0, 2.5, 1.0, 0.0],           "reverted"),
+        ([0, -2.5, -1.0, 0.5],         "reverted"),
+        ([0, 2.5, 2.0, 2.2],           "unresolved"),
+        ([0, 2.5, 3.0, 4.5, 0.0],      "diverged"),
+        ([0, 0.5, 1.0, 1.5],           "never_opened"),
+        ([0, 2.5, 0.0, 4.5],           "reverted"),     # only the first opening counts
+        ([0, 3.0, -4.5],               "diverged"),
+    ]
+    for z, expected in cases:
+        got = first_opening(z)
+        assert got == expected, f"{z}: expected {expected}, got {got}"
 
 
 def label_pair(row, prices, min_obs=MIN_TEST_OBS):
-    """Evaluate one screened pair on its test year. None if the window is short."""
+    """None if the test window is too short."""
     x, y = row.stockX, row.stockY
 
     pair = prices[[y, x]].loc[row.test_start:row.test_end].dropna()
@@ -25,49 +84,24 @@ def label_pair(row, prices, min_obs=MIN_TEST_OBS):
     if len(pair) < min_obs:
         return None
 
-    x_price = pair[x]
-    y_price = pair[y]
-
-    spread = y_price - (row.alpha + row.beta * x_price)
-    z = (spread - row.spread_mean) / row.spread_std
-
-    # The version I started from counted crossings as
-    # (signs != signs.shift(1)).sum(), which always counts position 0 because
-    # shift puts a NaN there and x != NaN is True. So "crossings >= 2" was
-    # really testing "crossings >= 1".
-    crossings = int((np.diff(np.sign(z.values)) != 0).sum())
-    max_abs_z = float(abs(z).max())
-
-    persisted = bool((crossings >= 2) and (max_abs_z < 4))
-
-    trades = simulate_trades(z, row.spread_std, x_price, y_price, row.beta)
-    returns = [t[0] for t in trades]
-    reasons = [t[1] for t in trades]
+    spread = pair[y] - (row.alpha + row.beta * pair[x])
+    z = spread / row.spread_std
 
     return {
         "pair_id": row.pair_id,
         "stockX": x,
         "stockY": y,
-        "test_year": row.test_start[:4],
+        "test_year": int(row.test_start[:4]),
         "p_value_coint": row.p_value_coint,
-        "p_value_adf": row.p_value_adf,
-        "halflife": row.halflife,
-        "beta": row.beta,
-        "crossings": crossings,
-        "max_abs_z": max_abs_z,
-        "persisted": persisted,
-        "n_trades": len(trades),
-        "n_reverted": reasons.count("reverted"),
-        "n_stopped": reasons.count("stopped"),
-        "n_marked": reasons.count("marked"),
-        "total_return": sum(returns) if returns else 0.0,
-        "worst_trade": min(returns) if returns else np.nan,
-        "same_sector": row.same_sector,
-        "same_sub_industry": row.same_sub_industry,
+        "outcome": first_opening(z),
+        "spread_vol": float(z.std()),
+        "same_sector": bool(row.same_sector),
     }
 
 
 if __name__ == "__main__":
+    check_first_opening()
+
     prices = pd.read_parquet("data/prices.parquet")
     screen = pd.read_parquet("data/screen_3yr.parquet")
 
@@ -85,19 +119,5 @@ if __name__ == "__main__":
     labels = pd.DataFrame(results)
     labels.to_parquet("data/labels.parquet")
 
-    traded = labels[labels["n_trades"] > 0]
-
     print(f"Labelled {len(labels)}, skipped {skipped}")
-    print(f"Overall persistence rate: {labels['persisted'].mean():.2%}")
-    print(f"Pairs that never traded:  {(labels['n_trades'] == 0).mean():.2%}")
-
-    print("\nPersistence by test year:")
-    print(labels.groupby("test_year")["persisted"].mean())
-
-    print("\nMedian return by test year (traded pairs):")
-    print(traded.groupby("test_year")["total_return"].median())
-
-    print("\nHow trades closed:")
-    print(f"  reverted: {labels['n_reverted'].sum()}")
-    print(f"  stopped:  {labels['n_stopped'].sum()}")
-    print(f"  marked:   {labels['n_marked'].sum()}")
+    print(labels["outcome"].value_counts().to_string())

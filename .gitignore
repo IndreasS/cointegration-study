@@ -1,4 +1,9 @@
 venv/
-data/
 __pycache__/
 *.code-workspace
+
+# Ignore the data directory's contents, but keep the universe pinned. Written
+# as data/* rather than data/, because git does not descend into an excluded
+# directory and the negation below would never be reached.
+data/*
+!data/universe.csv

@@ -1,10 +1,19 @@
 """
-Four cuts of the labelled results.
+Does the Engle-Granger p-value identify pairs whose spreads revert out of
+sample?
 
-1. By formation p-value decile. Does the ranking predict anything?
-2. By test year. Is the pattern stable?
-3. By sector and sub-industry. Does economic linkage matter?
-4. Against VIX. What drives performance, if not the p-value?
+    1. sort_by_pvalue   outcome by p-value decile
+    2. spread_vol_check why the sort looks the way it does
+    3. against_vix      whether market volatility moves the same outcome
+    4. sector_check     whether economic linkage moves it
+
+The outcome is diverged per reversion, over pairs whose spread opened. It is a
+ratio rather than a share because a spread that moves further in z units hits
+both barriers more often, so the diverged and reverted shares both rise with
+volatility. The ratio asks which way it resolved, not how often.
+
+No standard errors: pair-years share stocks and years, so they are not
+independent.
 
 Saves two figures.
 """
@@ -13,160 +22,197 @@ import os
 import pandas as pd
 import yfinance as yf
 import matplotlib.pyplot as plt
-from scipy.stats import pearsonr, spearmanr
+from scipy.stats import spearmanr
 
-labels = pd.read_parquet("data/labels.parquet")
-
-# EG runs in both directions, but AAPL-MSFT and MSFT-AAPL are near enough the
-# same test. Keeping both double counts every pair. Direction is fixed by name
-# rather than by taking the smaller p-value, which would bias the sort.
-labels = labels[labels["stockX"] < labels["stockY"]].copy()
-
-# Rank within each test year before cutting into deciles. Pooling across years
-# would let one year's p-value distribution dominate the buckets, since the
-# pass rate varies from 3.5% to 13% across the sample.
-labels["decile"] = (
-    labels.groupby("test_year")["p_value_coint"]
-          .transform(lambda s: pd.qcut(s, 10, labels=False, duplicates="drop"))
-) + 1
-
-# A pair that never triggered an entry has a return of exactly zero, which is
-# not the same as a losing trade. Return stats use traded pairs only.
-traded = labels[labels["n_trades"] > 0]
+N_DECILES = 10
+VIX_FILE = "data/vix.parquet"
 
 
-# --- 1. does formation significance predict anything? ---
-by_decile = pd.DataFrame({
-    "n_pairs":       labels.groupby("decile").size(),
-    "mean_pvalue":   labels.groupby("decile")["p_value_coint"].mean(),
-    "persist_rate":  labels.groupby("decile")["persisted"].mean(),
-    "median_return": traded.groupby("decile")["total_return"].median(),
-    "mean_return":   traded.groupby("decile")["total_return"].mean(),
-    "frac_losing":   traded.groupby("decile")["total_return"].apply(lambda s: (s < 0).mean()),
-    "worst_trade":   labels.groupby("decile")["worst_trade"].min(),
-    "mean_trades":   labels.groupby("decile")["n_trades"].mean(),
-})
+def load():
+    labels = pd.read_parquet("data/labels.parquet")
 
-by_decile["stop_revert_ratio"] = (
-    labels.groupby("decile")["n_stopped"].sum()
-    / labels.groupby("decile")["n_reverted"].sum()
-)
+    # EG is run in both directions, but AAPL-MSFT and MSFT-AAPL are close to
+    # the same observation twice. Keeping both makes the sample look twice as
+    # big as it is. Which direction is kept is fixed by name rather than by
+    # picking the smaller p-value, which would bias the sort. Not split on
+    # pair_id, since BRK-B has a hyphen in it.
+    labels = labels[labels["stockX"] < labels["stockY"]].copy()
 
-print("=== By formation p-value decile (1 = most significant) ===")
-print(by_decile.round(4).to_string())
+    # Ranked within each year, otherwise the years with high pass rates would
+    # fill the bottom deciles.
+    labels["p_decile"] = (
+        labels.groupby("test_year")["p_value_coint"]
+              .transform(lambda s: pd.qcut(s, N_DECILES, labels=False))
+    ) + 1
 
-print("\n=== Median return by decile and test year (traded pairs) ===")
-print(traded.pivot_table(index="decile", columns="test_year",
-                         values="total_return", aggfunc="median").round(4).to_string())
+    labels["opened"] = labels["outcome"] != "never_opened"
+    labels["diverged"] = labels["outcome"] == "diverged"
+    labels["reverted"] = labels["outcome"] == "reverted"
+    labels["resolved"] = labels["diverged"] | labels["reverted"]
 
-top = traded[traded["decile"] == 1]
-bottom = traded[traded["decile"] == 10]
-
-print("\n=== Decile 1 vs decile 10 ===")
-print(f"  median return: {top['total_return'].median():.4f}  vs  {bottom['total_return'].median():.4f}")
-print(f"  mean return:   {top['total_return'].mean():.4f}  vs  {bottom['total_return'].mean():.4f}")
-print(f"  frac losing:   {(top['total_return'] < 0).mean():.2%}  vs  {(bottom['total_return'] < 0).mean():.2%}")
-print(f"  persist rate:  {labels[labels['decile'] == 1]['persisted'].mean():.2%}"
-      f"  vs  {labels[labels['decile'] == 10]['persisted'].mean():.2%}")
+    return labels
 
 
-# --- 2. is the pattern stable across years? ---
-by_year = pd.DataFrame({
-    "n_pairs":       labels.groupby("test_year").size(),
-    "persist_rate":  labels.groupby("test_year")["persisted"].mean(),
-    "median_return": traded.groupby("test_year")["total_return"].median(),
-    "frac_losing":   traded.groupby("test_year")["total_return"].apply(lambda s: (s < 0).mean()),
-    "n_reverted":    labels.groupby("test_year")["n_reverted"].sum(),
-    "n_stopped":     labels.groupby("test_year")["n_stopped"].sum(),
-    "n_marked":      labels.groupby("test_year")["n_marked"].sum(),
-})
-by_year["stop_revert_ratio"] = by_year["n_stopped"] / by_year["n_reverted"]
+def outcomes(df, group):
+    """Outcome columns for pairs that opened, one row per group."""
+    grouped = df[df["opened"]].groupby(group)
 
-print("\n=== By test year ===")
-print(by_year.round(4).to_string())
-
-
-# --- 3. does economic linkage matter? ---
-def sector_cut(df, traded_df, flag):
     return pd.DataFrame({
-        "n_pairs":       df.groupby(flag).size(),
-        "persist_rate":  df.groupby(flag)["persisted"].mean(),
-        "median_return": traded_df.groupby(flag)["total_return"].median(),
-        "mean_return":   traded_df.groupby(flag)["total_return"].mean(),
-        "frac_losing":   traded_df.groupby(flag)["total_return"].apply(lambda s: (s < 0).mean()),
-        "stop_revert":   df.groupby(flag)["n_stopped"].sum() / df.groupby(flag)["n_reverted"].sum(),
+        "n_opened": grouped.size(),
+        "diverged": grouped["diverged"].sum(),
+        "reverted": grouped["reverted"].sum(),
+        "resolved_share": grouped["resolved"].mean(),
+        "ratio": grouped["diverged"].sum() / grouped["reverted"].sum(),
     })
 
-print("\n=== Same sector vs cross sector ===")
-print(sector_cut(labels, traded, "same_sector").round(4).to_string())
 
-# only 822 same sub-industry pair-years, so these estimates are noisy
-print("\n=== Same sub-industry vs not ===")
-print(sector_cut(labels, traded, "same_sub_industry").round(4).to_string())
+def sort_by_pvalue(labels):
+    table = outcomes(labels, "p_decile")
+    table.insert(0, "mean_p", labels.groupby("p_decile")["p_value_coint"].mean())
 
-
-# --- 4. what does drive performance? ---
-vix = yf.download("^VIX", start="2013-01-01", end="2025-12-31", auto_adjust=True)["Close"]
-vix_yearly = vix.groupby(vix.index.year).agg(["mean", "max"])
-vix_yearly.columns = ["vix_mean", "vix_max"]
-
-regime = by_year[["persist_rate", "median_return", "frac_losing", "stop_revert_ratio"]].copy()
-regime.index = regime.index.astype(int)
-regime = regime.join(vix_yearly)
-
-print("\n=== Outcome vs volatility regime ===")
-print(regime.round(4).to_string())
-
-# Spearman as well as Pearson. Most years sit between 11 and 20 on mean VIX,
-# but 2020 is at 29.3 and 2022 at 25.6. Those two drag a linear fit without
-# being outliers in rank terms. At n=13 a correlation needs to be around 0.55
-# to reach p<0.05, so treat anything weaker as suggestive.
-print()
-for col in ["stop_revert_ratio", "median_return", "frac_losing", "persist_rate"]:
-    r, p = pearsonr(regime["vix_mean"], regime[col])
-    rho, prho = spearmanr(regime["vix_mean"], regime[col])
-    print(f"{col:20s} vs mean VIX:  r={r:+.3f} (p={p:.3f})   rho={rho:+.3f} (p={prho:.3f})")
+    print("\n=== 1. Diverged per reversion by p-value decile ===")
+    print(table[["mean_p", "n_opened", "diverged", "reverted", "ratio"]]
+          .round(4).to_string())
+    return table
 
 
-# --- figures ---
-os.makedirs("figures", exist_ok=True)
+def spread_vol_check(labels):
+    """
+    A small p-value means a tight formation fit, so a small spread_std. That
+    is the denominator of z, so the same move out of sample gives a bigger z.
+    If so, low p-value pairs should open more, move more, and resolve more,
+    without resolving any more often in the right direction.
+    """
+    grouped = labels.groupby("p_decile")
 
-# Twin axes because persistence is a rate in [0,1] and returns are small
-# negatives. One axis would flatten the return line to nothing.
-fig, ax1 = plt.subplots(figsize=(8, 5))
+    table = pd.DataFrame({
+        "open_rate": grouped["opened"].mean(),
+        "resolved_share": outcomes(labels, "p_decile")["resolved_share"],
+        "vol_mean": grouped["spread_vol"].mean(),
+        "vol_median": grouped["spread_vol"].median(),
+    })
 
-ax1.plot(by_decile.index, by_decile["persist_rate"], "o-", color="tab:blue")
-ax1.set_xlabel("Formation p-value decile (1 = most significant)")
-ax1.set_ylabel("Persistence rate", color="tab:blue")
-ax1.tick_params(axis="y", labelcolor="tab:blue")
-ax1.set_xticks(by_decile.index)
+    # rho only. Pair-years are not independent, so the p-value would be
+    # meaningless.
+    rho, _ = spearmanr(labels["p_value_coint"], labels["spread_vol"])
 
-ax2 = ax1.twinx()
-ax2.plot(by_decile.index, by_decile["median_return"], "s--", color="tab:red")
-ax2.axhline(0, color="grey", lw=0.8, ls=":")
-ax2.set_ylabel("Median return (traded pairs)", color="tab:red")
-ax2.tick_params(axis="y", labelcolor="tab:red")
+    print("\n=== 2. Spread volatility by p-value decile ===")
+    print(table.round(4).to_string())
+    print(f"p-value vs spread_vol, pair level: rho={rho:+.3f}")
+    return table
 
-plt.title("Out-of-sample outcome by formation p-value decile")
-fig.tight_layout()
-fig.savefig("figures/decile_sort.png", dpi=150)
-plt.close(fig)
 
-fig, ax = plt.subplots(figsize=(8, 5))
+def load_vix():
+    # Cached for the same reason as prices: yfinance can revise history, and
+    # the correlation below should not move between runs.
+    if os.path.exists(VIX_FILE):
+        return pd.read_parquet(VIX_FILE)["vix"]
 
-ax.scatter(regime["vix_mean"], regime["stop_revert_ratio"], s=60, color="tab:blue")
+    # end is exclusive in yfinance, so 2026-01-01 keeps 31 December 2025.
+    vix = yf.download("^VIX", start="2013-01-01", end="2026-01-01",
+                      auto_adjust=True, progress=False)["Close"]
 
-for year, row in regime.iterrows():
-    ax.annotate(str(year), (row["vix_mean"], row["stop_revert_ratio"]),
-                xytext=(5, 3), textcoords="offset points", fontsize=9)
+    # One column DataFrame on newer yfinance, Series on older. Without the
+    # squeeze the assignment below produces a column called ^VIX.
+    if isinstance(vix, pd.DataFrame):
+        vix = vix.iloc[:, 0]
 
-ax.axhline(1.0, color="grey", lw=0.8, ls=":")   # stops = reversions
-ax.set_xlabel("Mean VIX over test year")
-ax.set_ylabel("Stop-outs per reversion")
-ax.set_title("Pairs trading fares worse in calm markets\n(Spearman rho = -0.64, p = 0.018)")
+    vix = vix.rename("vix")
+    vix.to_frame().to_parquet(VIX_FILE)
+    return vix
 
-fig.tight_layout()
-fig.savefig("figures/vix_regime.png", dpi=150)
-plt.close(fig)
 
-print("\nSaved figures/decile_sort.png and figures/vix_regime.png")
+def against_vix(labels):
+    table = outcomes(labels, "test_year")
+    table["spread_vol"] = labels.groupby("test_year")["spread_vol"].mean()
+
+    vix = load_vix()
+    table["vix_mean"] = vix.groupby(vix.index.year).mean()
+
+    print("\n=== 3. By test year, against mean VIX ===")
+    print(table[["n_opened", "ratio", "spread_vol", "vix_mean"]]
+          .round(4).to_string())
+
+    # spread_vol checks whether the VIX result is step 2 at the yearly level.
+    #
+    # Spearman because 2020 and 2022 sit well above the other years on VIX and
+    # would drag a linear fit without being extreme in rank. At n=13 a
+    # correlation needs to be around 0.55 to reach p<0.05.
+    print()
+    for col in ["ratio", "spread_vol"]:
+        rho, p = spearmanr(table["vix_mean"], table[col])
+        print(f"{col:11s} vs mean VIX: rho={rho:+.3f} (p={p:.3f}, n={len(table)})")
+
+    return table
+
+
+def sector_check(labels):
+    """
+    If the p-value carries no information, economic linkage might. Two stocks
+    in the same GICS sector share a factor the regression is fitting, so their
+    spread has a reason to come back that an arbitrary cross-sector pair does
+    not.
+    """
+    table = outcomes(labels, "same_sector")
+    table.index = table.index.map({True: "same sector", False: "cross sector"})
+    table.index.name = None
+
+    print("\n=== 4. Same sector vs cross sector ===")
+    print(table[["n_opened", "diverged", "reverted", "resolved_share", "ratio"]]
+          .round(4).to_string())
+    return table
+
+
+def figures(p_table, vol_table, year_table):
+    os.makedirs("figures", exist_ok=True)
+    plt.close("all")
+
+    # Side by side because the right panel is the explanation for the left.
+    fig, axes = plt.subplots(1, 2, figsize=(12, 5))
+
+    axes[0].plot(p_table.index, p_table["ratio"], "o-")
+    axes[0].axhline(1.0, color="grey", lw=0.8, ls=":")     # diverged = reverted
+    axes[0].set_ylabel("Diverged per reversion")
+
+    axes[1].plot(vol_table.index, vol_table["vol_mean"], "o-", color="tab:grey")
+    axes[1].set_ylabel("Mean test-year spread volatility (z units)")
+
+    for ax in axes:
+        ax.set_xlabel("Formation p-value decile")
+        ax.set_xticks(p_table.index)
+
+    fig.tight_layout()
+    fig.savefig("figures/pvalue_deciles.png", dpi=150)
+    plt.close(fig)
+
+    fig, ax = plt.subplots(figsize=(8, 5))
+    ax.scatter(year_table["vix_mean"], year_table["ratio"], s=60)
+
+    for year, row in year_table.iterrows():
+        ax.annotate(str(year), (row["vix_mean"], row["ratio"]),
+                    xytext=(5, 3), textcoords="offset points", fontsize=9)
+
+    rho, p = spearmanr(year_table["vix_mean"], year_table["ratio"])
+
+    ax.axhline(1.0, color="grey", lw=0.8, ls=":")
+    ax.set_xlabel("Mean VIX over test year")
+    ax.set_ylabel("Diverged per reversion")
+    ax.set_title(f"Spearman rho = {rho:.2f}, p = {p:.3f}, n = {len(year_table)}")
+
+    fig.tight_layout()
+    fig.savefig("figures/vix_regime.png", dpi=150)
+    plt.close(fig)
+
+    print("\nSaved figures/pvalue_deciles.png and figures/vix_regime.png")
+
+
+if __name__ == "__main__":
+    labels = load()
+    print(f"{len(labels)} pair-years, one direction per pair")
+
+    p_table = sort_by_pvalue(labels)
+    vol_table = spread_vol_check(labels)
+    year_table = against_vix(labels)
+    sector_check(labels)
+
+    figures(p_table, vol_table, year_table)

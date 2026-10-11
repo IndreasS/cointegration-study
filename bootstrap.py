@@ -16,15 +16,16 @@ The resampler destroys cointegration and keeps the rest:
   54 stocks together. Preserves contemporaneous correlation. Shuffling columns
   separately would destroy it.
 
-Mean pairwise return correlation: 0.3587 real, 0.3626 resampled.
-Null pass rate: 6.55% at block 10, 6.32% at block 21.
+The null is estimated on one formation window, taken from rolling_windows so
+it is the same length as the windows it is compared against. The size of the
+EG test depends on sample length.
 """
 
 import numpy as np
 import pandas as pd
 from arch.bootstrap import optimal_block_length
 
-from screen import screen_pvalues_only
+from screen import screen_pvalues_only, rolling_windows
 
 
 def resample_prices(prices, block_length, seed):
@@ -85,23 +86,30 @@ if __name__ == "__main__":
     universe = pd.read_csv("data/universe.csv")
     returns = np.log(prices).diff().dropna()
 
-    # Politis-White-Patton block length, reported as a diagnostic only.
-    # It comes back at a mean of 1.69 days, reflecting almost no linear
-    # autocorrelation in daily mega cap returns. But PPW optimises for
-    # estimating a mean under linear dependence, and what matters here is
-    # whether volatility clustering inflates the size of a cointegration test.
-    # Different objective, so I test a range of block lengths instead.
-    #
-    # print(optimal_block_length(returns).describe())
+    # Politis-White-Patton block length, printed as a diagnostic only. It
+    # comes back around 1.69 days, reflecting almost no linear autocorrelation
+    # in daily mega cap returns. But PPW optimises for estimating a mean under
+    # linear dependence, and what matters here is whether volatility
+    # clustering inflates the size of a cointegration test. Different
+    # objective, so a range of block lengths is tested instead.
+    print("Politis-White-Patton block length (diagnostic, not used):")
+    print(optimal_block_length(returns).describe().round(2).to_string())
 
     N_REPS = 20
     BLOCK_LENGTHS = [10, 21]
+
+    # 2015 is the first formation start where all 54 stocks trade for the
+    # whole window.
+    form_start, form_end, _, _ = next(
+        w for w in rolling_windows(3) if w[0].startswith("2015")
+    )
+    print(f"\nNull estimated on formation window {form_start} to {form_end}")
 
     all_runs = []
     for bl in BLOCK_LENGTHS:
         print(f"=== block length {bl} ===")
         all_runs.append(run_bootstrap(prices, universe, bl, N_REPS,
-                                      "2015-01-01", "2018-12-31"))
+                                      form_start, form_end))
 
     null_dist = pd.concat(all_runs, ignore_index=True)
     null_dist.to_parquet("data/bootstrap_null.parquet")

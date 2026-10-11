@@ -1,25 +1,74 @@
 """
-Validates the engine against synthetic data with known answers.
+Validates the engine against data where the answer is known by construction.
 
-- recovers a known hedge ratio
-- recovers a known half life
-- detects cointegrated pairs
-- rejects independent random walks at roughly 5%
+Market data has no answer key. A hedge ratio of 1.01 could be right or it could
+be a plausible looking bug. These generators set beta and the half life
+explicitly so there is something to check against.
 
-Tolerances come from the measured spread, not from guessing. Beta has sd 0.04
-over 49 seeds, so 0.15 is about 4 sd. Half life has sd 1.58 and a range of 6.5
-to 14.1, so 5 is about 3 sd.
+    - recovers a known hedge ratio
+    - recovers a known half life
+    - detects cointegrated pairs
+    - rejects independent random walks at roughly 5%
+
+Tolerances come from the measured spread rather than from guessing. Beta has
+sd 0.04 over 49 seeds, so 0.15 is about 4 sd. Half life has sd 1.58 and a range
+of 6.5 to 14.1, so 5 is about 3 sd. My first attempt used a half life tolerance
+of 0.2, which passed on seed 1 and failed on seed 2 at 12.74.
+
+Nothing downstream is trusted until this passes.
 """
 
 import numpy as np
 import pandas as pd
 
-import synthetic
 import coint
 
 N_COINT_SEEDS = 49
 N_NULL_SEEDS = 1000
 
+
+# --- generators ---
+
+def random_walk(n, sigma=1.0, s0=100.0, seed=None):
+    """Driftless random walk. Non-stationary."""
+    rng = np.random.default_rng(seed)
+    return s0 + np.cumsum(rng.normal(0, sigma, n))
+
+
+def ar1(n, half_life, sigma=1.0, seed=None):
+    """
+    Mean reverting AR(1). phi = exp(-ln2 / half_life) decays a deviation to
+    half its size in half_life steps.
+    """
+    phi = np.exp(-np.log(2) / half_life)
+    rng = np.random.default_rng(seed)
+    shocks = rng.normal(0, sigma, n)
+
+    e = np.zeros(n)
+    for i in range(1, n):
+        e[i] = e[i - 1] * phi + shocks[i]
+
+    return e
+
+
+def independent_pair(n, sigma=1.0, s0=100, seed=None):
+    """
+    Two unrelated random walks.
+
+    Seeds spaced 2 apart: seed and seed+1 would make one trial's y series the
+    next trial's x series.
+    """
+    return random_walk(n, seed=seed * 2), random_walk(n, seed=seed * 2 + 1)
+
+
+def cointegrated_pair(n, beta=2.0, half_life=10, seed=None):
+    """y = beta*x + e, with x a random walk and e stationary AR(1)."""
+    x = random_walk(n, seed=seed * 2)
+    e = ar1(n, half_life=half_life, seed=seed * 2 + 1)
+    return x, beta * x + e, e
+
+
+# --- plumbing ---
 
 def framed_data(x, y):
     """
@@ -40,9 +89,11 @@ def run_engine(x, y):
                                prices, universe)
 
 
+# --- tests ---
+
 def test_recovery_on_cointegrated_pairs():
     for seed in range(1, N_COINT_SEEDS + 1):
-        x, y, e = synthetic.cointegrated_pair(1000, beta=2.0, half_life=10, seed=seed)
+        x, y, e = cointegrated_pair(1000, beta=2.0, half_life=10, seed=seed)
         r = run_engine(x, y)
 
         assert abs(r["beta"] - 2.0) < 0.15, f"beta off at seed {seed}"
@@ -55,13 +106,14 @@ def test_recovery_on_cointegrated_pairs():
 def test_false_positive_rate():
     """
     p-values under the null should be uniform on [0,1]: mean 0.5,
-    sd 1/sqrt(12) = 0.2887. Checking the distribution catches more than the
-    5% count alone.
+    sd 1/sqrt(12) = 0.2887. Checking the whole distribution catches more than
+    the 5% count on its own, since a test can get the tail right and still be
+    wrong everywhere else.
     """
     pvalues = []
 
     for seed in range(1, N_NULL_SEEDS + 1):
-        x, y = synthetic.independent_pair(1000, sigma=1.0, s0=100, seed=seed)
+        x, y = independent_pair(1000, sigma=1.0, s0=100, seed=seed)
         pvalues.append(run_engine(x, y)["p_value_coint"])
 
     count = sum(1 for p in pvalues if p < 0.05)

@@ -1,0 +1,55 @@
+Symbol,Sector,SubIndustry,marketcap
+NVDA,Information Technology,Semiconductors,5200733011968
+AAPL,Information Technology,"Technology Hardware, Storage & Peripherals",4514709504000
+GOOGL,Communication Services,Interactive Media & Services,4217126256640
+MSFT,Information Technology,Systems Software,3588320657408
+AMZN,Consumer Discretionary,Broadline Retail,2789664358400
+AVGO,Information Technology,Semiconductors,1752930451456
+TSLA,Consumer Discretionary,Automobile Manufacturers,1433132728320
+META,Communication Services,Interactive Media & Services,1400873680896
+LLY,Health Care,Pharmaceuticals,1119009636352
+MU,Information Technology,Semiconductors,1091874717696
+BRK-B,Financials,Multi-Sector Holdings,1061406703616
+JPM,Financials,Diversified Banks,934565052416
+WMT,Consumer Staples,Consumer Staples Merchandise Retail,825252773888
+AMD,Information Technology,Semiconductors,772568776704
+V,Financials,Transaction & Payment Processing Services,692749271040
+JNJ,Health Care,Pharmaceuticals,651250958336
+MA,Financials,Transaction & Payment Processing Services,508637642752
+INTC,Information Technology,Semiconductors,476119498752
+ABBV,Health Care,Biotechnology,468215398400
+CSCO,Information Technology,Communications Equipment,437656911872
+BAC,Financials,Diversified Banks,431382659072
+COST,Consumer Staples,Consumer Staples Merchandise Retail,420302618624
+KO,Consumer Staples,Soft Drinks & Non-alcoholic Beverages,391962198016
+CAT,Industrials,Construction Machinery & Heavy Transportation Equipment,380564832256
+MRK,Health Care,Pharmaceuticals,376367022080
+GE,Industrials,Aerospace & Defense,361455648768
+UNH,Health Care,Managed Health Care,350160715776
+PG,Consumer Staples,Personal Care Products,336901701632
+MS,Financials,Investment Banking & Brokerage,336415293440
+HD,Consumer Discretionary,Home Improvement Retail,334642315264
+NFLX,Communication Services,Movies & Entertainment,331407949824
+GS,Financials,Investment Banking & Brokerage,302608613376
+PM,Consumer Staples,Tobacco,293377802240
+RTX,Industrials,Aerospace & Defense,282907901952
+WFC,Financials,Diversified Banks,253532078080
+AMGN,Health Care,Biotechnology,237515849728
+TMO,Health Care,Life Sciences Tools & Services,232670887936
+VZ,Communication Services,Integrated Telecommunication Services,205453639680
+ABT,Health Care,Health Care Equipment,203165073408
+TMUS,Communication Services,Wireless Telecommunication Services,196341809152
+PEP,Consumer Staples,Soft Drinks & Non-alcoholic Beverages,195993681920
+MCD,Consumer Discretionary,Restaurants,191735480320
+DIS,Communication Services,Movies & Entertainment,186102300672
+UNP,Industrials,Rail Transportation,183004954624
+DE,Industrials,Agricultural & Farm Machinery,174886354944
+T,Communication Services,Integrated Telecommunication Services,173296844800
+BA,Industrials,Aerospace & Defense,169173549056
+ETN,Industrials,Electrical Components & Equipment,162775367680
+BKNG,Consumer Discretionary,"Hotels, Resorts & Cruise Lines",162430025728
+TJX,Consumer Discretionary,Apparel Retail,155244101632
+SBUX,Consumer Discretionary,Restaurants,122071203840
+LOW,Consumer Discretionary,Home Improvement Retail,121226485760
+MO,Consumer Staples,Tobacco,110353367040
+MNST,Consumer Staples,Soft Drinks & Non-alcoholic Beverages,93623083008
